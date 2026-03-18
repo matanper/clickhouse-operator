@@ -64,8 +64,8 @@ var _ = Describe("ConfigGenerator", func() {
 						Namespace: "test-namespace",
 					},
 					Spec: v1.ClickHouseClusterSpec{
-						Replicas: ptr.To[int32](2),
-						Shards:   ptr.To[int32](1),
+						Replicas:         ptr.To[int32](2),
+						Shards:           ptr.To[int32](1),
 						KeeperClusterRef: &corev1.LocalObjectReference{Name: "keeper"},
 						AdditionalDataVolumeClaimSpecs: []v1.AdditionalVolumeClaimSpec{
 							{Name: "disk1", Spec: corev1.PersistentVolumeClaimSpec{}},
@@ -93,6 +93,8 @@ var _ = Describe("ConfigGenerator", func() {
 		// as a YAML list (round-robin distribution), not as separate per-disk volumes.
 		parsed := map[any]any{}
 		Expect(yaml.Unmarshal([]byte(storageConfig), &parsed)).To(Succeed())
+		disks := parsed["storage_configuration"].(map[any]any)["disks"].(map[any]any)
+		Expect(disks).NotTo(HaveKey("default"), "default disk must not be explicitly defined in JBOD config")
 		policies := parsed["storage_configuration"].(map[any]any)["policies"].(map[any]any)
 		volumes := policies["default"].(map[any]any)["volumes"].(map[any]any)
 		Expect(volumes).To(HaveLen(1), "true JBOD has exactly one volume containing all disks")
@@ -105,4 +107,5 @@ var _ = Describe("ConfigGenerator", func() {
 		}
 		Expect(diskNames).To(ContainElements("default", "disk1", "disk2"))
 	})
+
 })

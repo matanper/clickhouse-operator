@@ -205,12 +205,7 @@ func templateStatefulSet(r *clickhouseReconciler, id v1.ClickHouseReplicaID) (*a
 		return nil, fmt.Errorf("template pod spec: %w", err)
 	}
 
-	resourceLabels := controllerutil.MergeMaps(r.Cluster.Spec.Labels, id.Labels(), map[string]string{
-		controllerutil.LabelAppKey:         r.Cluster.SpecificName(),
-		controllerutil.LabelInstanceK8sKey: r.Cluster.SpecificName(),
-		controllerutil.LabelRoleKey:        controllerutil.LabelClickHouseValue,
-		controllerutil.LabelAppK8sKey:      controllerutil.LabelClickHouseValue,
-	})
+	resourceLabels := replicaResourceLabels(r.Cluster, id)
 
 	spec := appsv1.StatefulSetSpec{
 		Selector: &metav1.LabelSelector{
@@ -238,27 +233,15 @@ func templateStatefulSet(r *clickhouseReconciler, id v1.ClickHouseReplicaID) (*a
 		RevisionHistoryLimit: ptr.To[int32](DefaultRevisionHistory),
 	}
 
-	if r.Cluster.Spec.DataVolumeClaimSpec != nil || len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs) > 0 {
-		if r.Cluster.Spec.DataVolumeClaimSpec != nil {
-			spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        internal.PersistentVolumeName,
-					Labels:      resourceLabels,
-					Annotations: r.Cluster.Spec.Annotations,
-				},
-				Spec: *r.Cluster.Spec.DataVolumeClaimSpec.DeepCopy(),
-			}}
-		}
-		for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
-			spec.VolumeClaimTemplates = append(spec.VolumeClaimTemplates, corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        addl.Name,
-					Labels:      resourceLabels,
-					Annotations: r.Cluster.Spec.Annotations,
-				},
-				Spec: *addl.Spec.DeepCopy(),
-			})
-		}
+	if r.Cluster.Spec.DataVolumeClaimSpec != nil {
+		spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        internal.PersistentVolumeName,
+				Labels:      resourceLabels,
+				Annotations: r.Cluster.Spec.Annotations,
+			},
+			Spec: *r.Cluster.Spec.DataVolumeClaimSpec.DeepCopy(),
+		}}
 	}
 
 	return &appsv1.StatefulSet{
@@ -624,6 +607,7 @@ func buildProtocols(cr *v1.ClickHouseCluster) map[string]protocol {
 
 func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.Volume, []corev1.VolumeMount, error) {
 	var volumeMounts []corev1.VolumeMount
+	var volumes []corev1.Volume
 	if r.Cluster.Spec.DataVolumeClaimSpec != nil {
 		volumeMounts = append(volumeMounts,
 			corev1.VolumeMount{
@@ -639,6 +623,14 @@ func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.
 		)
 	}
 	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
+		volumes = append(volumes, corev1.Volume{
+			Name: addl.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: additionalPVCName(r.Cluster, id, addl.Name),
+				},
+			},
+		})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      addl.Name,
 			MountPath: addl.MountPath,
@@ -680,7 +672,6 @@ func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.
 		configVolumes[generator.Path()] = volume
 	}
 
-	var volumes []corev1.Volume
 	for _, volume := range configVolumes {
 		controllerutil.SortKey(volume.ConfigMap.Items, func(item corev1.KeyToPath) string {
 			return item.Key
@@ -753,4 +744,35 @@ func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.
 	})
 
 	return volumes, volumeMounts, nil
+}
+
+func replicaResourceLabels(cluster *v1.ClickHouseCluster, id v1.ClickHouseReplicaID) map[string]string {
+	return controllerutil.MergeMaps(cluster.Spec.Labels, id.Labels(), map[string]string{
+		controllerutil.LabelAppKey:         cluster.SpecificName(),
+		controllerutil.LabelInstanceK8sKey: cluster.SpecificName(),
+		controllerutil.LabelRoleKey:        controllerutil.LabelClickHouseValue,
+		controllerutil.LabelAppK8sKey:      controllerutil.LabelClickHouseValue,
+	})
+}
+
+func additionalPVCName(cluster *v1.ClickHouseCluster, id v1.ClickHouseReplicaID, volumeName string) string {
+	return volumeName + "-" + cluster.StatefulSetNameByReplicaID(id) + "-0"
+}
+
+func templateAdditionalPVCs(r *clickhouseReconciler, id v1.ClickHouseReplicaID) []*corev1.PersistentVolumeClaim {
+	resourceLabels := replicaResourceLabels(r.Cluster, id)
+	pvcs := make([]*corev1.PersistentVolumeClaim, 0, len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs))
+	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
+		pvcs = append(pvcs, &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        additionalPVCName(r.Cluster, id, addl.Name),
+				Namespace:   r.Cluster.Namespace,
+				Labels:      resourceLabels,
+				Annotations: r.Cluster.Spec.Annotations,
+			},
+			Spec: *addl.Spec.DeepCopy(),
+		})
+	}
+
+	return pvcs
 }

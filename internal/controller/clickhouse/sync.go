@@ -811,11 +811,13 @@ func (r *clickhouseReconciler) updateReplica(ctx context.Context, log ctrlutil.L
 	}
 
 	replica := r.Replica(id)
+	additionalPVCs := templateAdditionalPVCs(r, id)
 
 	result, err := r.ReconcileReplicaResources(ctx, log, id, chctrl.ReplicaUpdateInput{
 		ExistingSTS:           replica.StatefulSet,
 		DesiredConfigMap:      configMap,
 		DesiredSTS:            statefulSet,
+		AdditionalPVCs:        additionalPVCs,
 		HasError:              replica.Error,
 		ConfigurationRevision: r.Cluster.Status.ConfigurationRevision,
 		StatefulSetRevision:   r.Cluster.Status.StatefulSetRevision,

@@ -196,6 +196,16 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileConfigMap(
 	return r.reconcileResource(ctx, log, configMap, []string{"Data", "BinaryData"}, action)
 }
 
+// ReconcilePVC reconciles a Kubernetes PersistentVolumeClaim resource.
+func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcilePVC(
+	ctx context.Context,
+	log util.Logger,
+	pvc *corev1.PersistentVolumeClaim,
+	action v1.EventAction,
+) (bool, error) {
+	return r.reconcileResource(ctx, log, pvc, []string{"Spec"}, action)
+}
+
 // Create creates the given Kubernetes resource and emits events on failure.
 func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) Create(ctx context.Context, resource client.Object, action v1.EventAction) error {
 	recorder := r.GetRecorder()
@@ -333,6 +343,7 @@ type ReplicaUpdateInput struct {
 	ExistingSTS           *appsv1.StatefulSet
 	DesiredConfigMap      *corev1.ConfigMap
 	DesiredSTS            *appsv1.StatefulSet
+	AdditionalPVCs        []*corev1.PersistentVolumeClaim
 	HasError              bool
 	ConfigurationRevision string
 	StatefulSetRevision   string
@@ -356,6 +367,13 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileReplicaResour
 
 	if err := ctrlruntime.SetControllerReference(r.Cluster, statefulSet, r.GetScheme()); err != nil {
 		return nil, fmt.Errorf("set replica StatefulSet controller reference: %w", err)
+	}
+
+	if len(input.AdditionalPVCs) > 0 {
+		pvcErr := r.reconcileAdditionalPVCs(ctx, log, input.AdditionalPVCs)
+		if pvcErr != nil {
+			return nil, fmt.Errorf("reconcile additional PVCs: %w", pvcErr)
+		}
 	}
 
 	if input.ExistingSTS == nil {
@@ -474,4 +492,24 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileReplicaResour
 	}
 
 	return &ctrlruntime.Result{RequeueAfter: RequeueOnRefreshTimeout}, nil
+}
+
+func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) reconcileAdditionalPVCs(
+	ctx context.Context,
+	log util.Logger,
+	pvcs []*corev1.PersistentVolumeClaim,
+) error {
+
+	for _, desiredPVC := range pvcs {
+		if desiredPVC == nil {
+			continue
+		}
+
+		_, err := r.ReconcilePVC(ctx, log, desiredPVC, v1.EventActionReconciling)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
