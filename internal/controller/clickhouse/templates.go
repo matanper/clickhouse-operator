@@ -639,13 +639,9 @@ func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.
 		)
 	}
 	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
-		mountPath := addl.MountPath
-		if mountPath == "" {
-			mountPath = "/var/lib/clickhouse/disks/" + addl.Name
-		}
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      addl.Name,
-			MountPath: mountPath,
+			MountPath: addl.MountPath,
 		})
 	}
 

@@ -753,7 +753,6 @@ func (r *keeperReconciler) updateReplica(ctx context.Context, log ctrlutil.Logge
 		ConfigurationRevision: r.Cluster.Status.ConfigurationRevision,
 		StatefulSetRevision:   r.Cluster.Status.StatefulSetRevision,
 		BreakingSTSVersion:    breakingStatefulSetVersion,
-		DataVolumeClaimSpec:   r.Cluster.Spec.DataVolumeClaimSpec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconcile replica %q resources: %w", replicaID, err)

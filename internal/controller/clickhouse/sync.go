@@ -820,7 +820,6 @@ func (r *clickhouseReconciler) updateReplica(ctx context.Context, log ctrlutil.L
 		ConfigurationRevision: r.Cluster.Status.ConfigurationRevision,
 		StatefulSetRevision:   r.Cluster.Status.StatefulSetRevision,
 		BreakingSTSVersion:    breakingStatefulSetVersion,
-		DataVolumeClaimSpec:   r.Cluster.Spec.DataVolumeClaimSpec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconcile replica %s resources: %w", id, err)

@@ -252,14 +252,14 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) Delete(ctx context.Con
 }
 
 // UpdatePVC updates the PersistentVolumeClaim for the given replica ID if it exists and differs from the provided spec.
-// When primaryPVCName is non-empty and multiple PVCs exist (e.g. from additional volumeClaimTemplates),
-// the PVC matching that name is updated. primaryPVCName should be "<vctName>-<statefulsetName>-<ordinal>".
+// When targetPVCName is non-empty and multiple PVCs exist (e.g. from additional volumeClaimTemplates),
+// the PVC matching that name is updated. targetPVCName should be "<vctName>-<statefulsetName>-<ordinal>".
 func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) UpdatePVC(
 	ctx context.Context,
 	log util.Logger,
 	id ReplicaID,
 	volumeSpec corev1.PersistentVolumeClaimSpec,
-	primaryPVCName string,
+	targetPVCName string,
 	action v1.EventAction,
 ) error {
 	cli := r.GetClient()
@@ -286,9 +286,9 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) UpdatePVC(
 	var pvc *corev1.PersistentVolumeClaim
 	if len(pvcs.Items) == 1 {
 		pvc = &pvcs.Items[0]
-	} else if primaryPVCName != "" {
+	} else if targetPVCName != "" {
 		for i := range pvcs.Items {
-			if pvcs.Items[i].Name == primaryPVCName {
+			if pvcs.Items[i].Name == targetPVCName {
 				pvc = &pvcs.Items[i]
 				break
 			}
@@ -298,7 +298,7 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) UpdatePVC(
 			for i, p := range pvcs.Items {
 				pvcNames[i] = p.Name
 			}
-			return fmt.Errorf("primary PVC %q not found among replica %v PVCs: %v", primaryPVCName, id, pvcNames)
+			return fmt.Errorf("target PVC %q not found among replica %v PVCs: %v", targetPVCName, id, pvcNames)
 		}
 	} else {
 		pvcNames := make([]string, len(pvcs.Items))
@@ -337,7 +337,6 @@ type ReplicaUpdateInput struct {
 	ConfigurationRevision string
 	StatefulSetRevision   string
 	BreakingSTSVersion    semver.Version
-	DataVolumeClaimSpec   *corev1.PersistentVolumeClaimSpec
 }
 
 // ReconcileReplicaResources reconciles a replica's ConfigMap, StatefulSet and PVC.
@@ -445,7 +444,6 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileReplicaResour
 			existingSpecsByTemplateName[template.Name] = template.Spec
 		}
 
-		updatedPVCSpec := false
 		for _, desiredTemplate := range statefulSet.Spec.VolumeClaimTemplates {
 			existingSpec, ok := existingSpecsByTemplateName[desiredTemplate.Name]
 			if !ok || gcmp.Equal(existingSpec, desiredTemplate.Spec) {
@@ -458,14 +456,10 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileReplicaResour
 				//nolint:nilerr // Error is logged internally and event sent
 				return nil, nil
 			}
-
-			updatedPVCSpec = true
 		}
 
-		// volumeClaimTemplates are immutable; keep existing templates in StatefulSet updates.
-		if updatedPVCSpec {
-			statefulSet.Spec.VolumeClaimTemplates = input.ExistingSTS.Spec.VolumeClaimTemplates
-		}
+		// volumeClaimTemplates are immutable; always keep existing templates in StatefulSet updates.
+		statefulSet.Spec.VolumeClaimTemplates = input.ExistingSTS.Spec.VolumeClaimTemplates
 	}
 
 	log.Info("updating replica StatefulSet", "statefulset", statefulSet.Name)
