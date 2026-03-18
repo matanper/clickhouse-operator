@@ -252,11 +252,14 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) Delete(ctx context.Con
 }
 
 // UpdatePVC updates the PersistentVolumeClaim for the given replica ID if it exists and differs from the provided spec.
+// When primaryPVCName is non-empty and multiple PVCs exist (e.g. from additional volumeClaimTemplates),
+// the PVC matching that name is updated. primaryPVCName should be "<vctName>-<statefulsetName>-<ordinal>".
 func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) UpdatePVC(
 	ctx context.Context,
 	log util.Logger,
 	id ReplicaID,
 	volumeSpec corev1.PersistentVolumeClaimSpec,
+	primaryPVCName string,
 	action v1.EventAction,
 ) error {
 	cli := r.GetClient()
@@ -280,29 +283,45 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) UpdatePVC(
 		return nil
 	}
 
-	if len(pvcs.Items) > 1 {
-		pvcNames := make([]string, len(pvcs.Items))
-		for i, pvc := range pvcs.Items {
-			pvcNames[i] = pvc.Name
+	var pvc *corev1.PersistentVolumeClaim
+	if len(pvcs.Items) == 1 {
+		pvc = &pvcs.Items[0]
+	} else if primaryPVCName != "" {
+		for i := range pvcs.Items {
+			if pvcs.Items[i].Name == primaryPVCName {
+				pvc = &pvcs.Items[i]
+				break
+			}
 		}
-
+		if pvc == nil {
+			pvcNames := make([]string, len(pvcs.Items))
+			for i, p := range pvcs.Items {
+				pvcNames[i] = p.Name
+			}
+			return fmt.Errorf("primary PVC %q not found among replica %v PVCs: %v", primaryPVCName, id, pvcNames)
+		}
+	} else {
+		pvcNames := make([]string, len(pvcs.Items))
+		for i, p := range pvcs.Items {
+			pvcNames[i] = p.Name
+		}
 		return fmt.Errorf("found multiple PVCs for replica %v: %v", id, pvcNames)
 	}
 
-	if gcmp.Equal(pvcs.Items[0].Spec, volumeSpec) {
-		log.Debug("replica PVC is up to date", "pvc", pvcs.Items[0].Name)
+	if gcmp.Equal(pvc.Spec, volumeSpec) {
+		log.Debug("replica PVC is up to date", "pvc", pvc.Name)
 		return nil
 	}
 
 	targetSpec := volumeSpec.DeepCopy()
-	if err := util.ApplyDefault(targetSpec, pvcs.Items[0].Spec); err != nil {
+	if err := util.ApplyDefault(targetSpec, pvc.Spec); err != nil {
 		return fmt.Errorf("apply patch to replica PVC %v: %w", id, err)
 	}
 
-	log.Info("updating replica PVC", "pvc", pvcs.Items[0].Name, "diff", gcmp.Diff(pvcs.Items[0].Spec, targetSpec))
+	log.Info("updating replica PVC", "pvc", pvc.Name, "diff", gcmp.Diff(pvc.Spec, targetSpec))
 
-	pvcs.Items[0].Spec = *targetSpec
-	if err := r.Update(ctx, &pvcs.Items[0], action); err != nil {
+	pvc.Spec = *targetSpec
+	if err := r.Update(ctx, pvc, action); err != nil {
 		return fmt.Errorf("update replica PVC %v: %w", id, err)
 	}
 
@@ -420,13 +439,31 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileReplicaResour
 		return nil, nil
 	}
 
-	if input.DataVolumeClaimSpec != nil {
-		if !gcmp.Equal(input.ExistingSTS.Spec.VolumeClaimTemplates[0].Spec, input.DataVolumeClaimSpec) {
-			if err = r.UpdatePVC(ctx, log, replicaID, *input.DataVolumeClaimSpec, v1.EventActionReconciling); err != nil {
+	if len(statefulSet.Spec.VolumeClaimTemplates) > 0 && len(input.ExistingSTS.Spec.VolumeClaimTemplates) > 0 {
+		existingSpecsByTemplateName := make(map[string]corev1.PersistentVolumeClaimSpec, len(input.ExistingSTS.Spec.VolumeClaimTemplates))
+		for _, template := range input.ExistingSTS.Spec.VolumeClaimTemplates {
+			existingSpecsByTemplateName[template.Name] = template.Spec
+		}
+
+		updatedPVCSpec := false
+		for _, desiredTemplate := range statefulSet.Spec.VolumeClaimTemplates {
+			existingSpec, ok := existingSpecsByTemplateName[desiredTemplate.Name]
+			if !ok || gcmp.Equal(existingSpec, desiredTemplate.Spec) {
+				continue
+			}
+
+			// Every replica StatefulSet has a single Pod with ordinal 0.
+			pvcName := desiredTemplate.Name + "-" + input.ExistingSTS.Name + "-0"
+			if err = r.UpdatePVC(ctx, log, replicaID, desiredTemplate.Spec, pvcName, v1.EventActionReconciling); err != nil {
 				//nolint:nilerr // Error is logged internally and event sent
 				return nil, nil
 			}
 
+			updatedPVCSpec = true
+		}
+
+		// volumeClaimTemplates are immutable; keep existing templates in StatefulSet updates.
+		if updatedPVCSpec {
 			statefulSet.Spec.VolumeClaimTemplates = input.ExistingSTS.Spec.VolumeClaimTemplates
 		}
 	}

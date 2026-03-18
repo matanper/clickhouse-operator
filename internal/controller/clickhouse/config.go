@@ -28,6 +28,8 @@ var (
 	userConfigTemplateStr string
 	//go:embed templates/client.yaml.tmpl
 	clientConfigTemplateStr string
+	//go:embed templates/storage_jbod.yaml.tmpl
+	storageJbodConfigTemplateStr string
 
 	generators []configGenerator
 )
@@ -104,6 +106,13 @@ func init() {
 		})
 	}
 
+	storageJbodTmpl := template.Must(template.New("").Parse(storageJbodConfigTemplateStr))
+	generators = append(generators, &storageJbodConfigGenerator{
+		filename: "10-storage-jbod.yaml",
+		path:     path.Join(ConfigPath, ConfigDPath),
+		template: storageJbodTmpl,
+	})
+
 	generators = append(generators,
 		&extraConfigGenerator{
 			Name:          ExtraConfigFileName,
@@ -159,6 +168,63 @@ func (g *templateConfigGenerator) Generate(r *clickhouseReconciler, id v1.ClickH
 	}
 
 	return data, nil
+}
+
+type storageJbodConfigGenerator struct {
+	filename string
+	path     string
+	template *template.Template
+}
+
+func (g *storageJbodConfigGenerator) Filename() string {
+	return g.filename
+}
+
+func (g *storageJbodConfigGenerator) Path() string {
+	return g.path
+}
+
+func (g *storageJbodConfigGenerator) ConfigKey() string {
+	return controllerutil.PathToName(path.Join(g.path, g.filename))
+}
+
+func (g *storageJbodConfigGenerator) Exists(r *clickhouseReconciler) bool {
+	return len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs) > 0
+}
+
+func (g *storageJbodConfigGenerator) Generate(r *clickhouseReconciler, _ v1.ClickHouseReplicaID) (string, error) {
+	additionalDisks := make([]struct {
+		Name string
+		Path string
+	}, 0, len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs))
+	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
+		diskPath := addl.MountPath
+		if diskPath == "" {
+			diskPath = "/var/lib/clickhouse/disks/" + addl.Name
+		}
+		if diskPath[len(diskPath)-1] != '/' {
+			diskPath += "/"
+		}
+		additionalDisks = append(additionalDisks, struct {
+			Name string
+			Path string
+		}{Name: addl.Name, Path: diskPath})
+	}
+	params := struct {
+		DefaultDiskPath string
+		AdditionalDisks []struct {
+			Name string
+			Path string
+		}
+	}{
+		DefaultDiskPath: internal.ClickHouseDataPath + "/",
+		AdditionalDisks: additionalDisks,
+	}
+	builder := strings.Builder{}
+	if err := g.template.Execute(&builder, params); err != nil {
+		return "", fmt.Errorf("template storage JBOD config: %w", err)
+	}
+	return builder.String(), nil
 }
 
 type configGeneratorFunc func(tmpl *template.Template, r *clickhouseReconciler, id v1.ClickHouseReplicaID) (string, error)

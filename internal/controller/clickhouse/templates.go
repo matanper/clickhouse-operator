@@ -238,15 +238,27 @@ func templateStatefulSet(r *clickhouseReconciler, id v1.ClickHouseReplicaID) (*a
 		RevisionHistoryLimit: ptr.To[int32](DefaultRevisionHistory),
 	}
 
-	if r.Cluster.Spec.DataVolumeClaimSpec != nil {
-		spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        internal.PersistentVolumeName,
-				Labels:      resourceLabels,
-				Annotations: r.Cluster.Spec.Annotations,
-			},
-			Spec: *r.Cluster.Spec.DataVolumeClaimSpec.DeepCopy(),
-		}}
+	if r.Cluster.Spec.DataVolumeClaimSpec != nil || len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs) > 0 {
+		if r.Cluster.Spec.DataVolumeClaimSpec != nil {
+			spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        internal.PersistentVolumeName,
+					Labels:      resourceLabels,
+					Annotations: r.Cluster.Spec.Annotations,
+				},
+				Spec: *r.Cluster.Spec.DataVolumeClaimSpec.DeepCopy(),
+			}}
+		}
+		for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
+			spec.VolumeClaimTemplates = append(spec.VolumeClaimTemplates, corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        addl.Name,
+					Labels:      resourceLabels,
+					Annotations: r.Cluster.Spec.Annotations,
+				},
+				Spec: *addl.Spec.DeepCopy(),
+			})
+		}
 	}
 
 	return &appsv1.StatefulSet{
@@ -625,6 +637,16 @@ func buildVolumes(r *clickhouseReconciler, id v1.ClickHouseReplicaID) ([]corev1.
 				SubPath:   "var-log-clickhouse",
 			},
 		)
+	}
+	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
+		mountPath := addl.MountPath
+		if mountPath == "" {
+			mountPath = "/var/lib/clickhouse/disks/" + addl.Name
+		}
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      addl.Name,
+			MountPath: mountPath,
+		})
 	}
 
 	defaultConfigMapMode := corev1.ConfigMapVolumeSourceDefaultMode

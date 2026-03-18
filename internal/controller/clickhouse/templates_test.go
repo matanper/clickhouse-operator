@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -59,6 +60,39 @@ var _ = Describe("BuildVolumes", func() {
 		Expect(volumes).To(HaveLen(4))
 		Expect(mounts).To(HaveLen(4))
 		checkVolumeMounts(volumes, mounts)
+	})
+
+	It("should add volume mounts for additionalDataVolumeClaimSpecs", func() {
+		ctx.Cluster = &v1.ClickHouseCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test",
+			},
+			Spec: v1.ClickHouseClusterSpec{
+				DataVolumeClaimSpec: &corev1.PersistentVolumeClaimSpec{},
+				AdditionalDataVolumeClaimSpecs: []v1.AdditionalVolumeClaimSpec{
+					{
+						Name:      "disk1",
+						MountPath: "/var/lib/clickhouse/disks/disk1",
+						Spec:      corev1.PersistentVolumeClaimSpec{},
+					},
+					{
+						Name:      "disk2",
+						MountPath: "/var/lib/clickhouse/disks/disk2",
+						Spec:      corev1.PersistentVolumeClaimSpec{},
+					},
+				},
+			},
+		}
+		volumes, mounts, err := buildVolumes(&ctx, v1.ClickHouseReplicaID{})
+		Expect(err).To(Not(HaveOccurred()))
+		Expect(mounts).To(HaveLen(7)) // 5 from data+config + 2 additional
+		checkVolumeMounts(volumes, mounts, "disk1", "disk2")
+		mountPaths := make(map[string]string)
+		for _, m := range mounts {
+			mountPaths[m.MountPath] = m.Name
+		}
+		Expect(mountPaths["/var/lib/clickhouse/disks/disk1"]).To(Equal("disk1"))
+		Expect(mountPaths["/var/lib/clickhouse/disks/disk2"]).To(Equal("disk2"))
 	})
 
 	It("should add volumes provided by user", func() {
@@ -300,9 +334,77 @@ var _ = Describe("PDB", func() {
 	})
 })
 
-func checkVolumeMounts(volumes []corev1.Volume, mounts []corev1.VolumeMount) {
+var _ = Describe("TemplateStatefulSet", func() {
+	It("should create StatefulSet with additional volumeClaimTemplates for JBOD", func() {
+		r := &clickhouseReconciler{
+			reconcilerBase: reconcilerBase{
+				Cluster: &v1.ClickHouseCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "jbod", Namespace: "default"},
+					Spec: v1.ClickHouseClusterSpec{
+						Shards:   ptr.To[int32](2),
+						Replicas: ptr.To[int32](2),
+						KeeperClusterRef: &corev1.LocalObjectReference{Name: "keeper"},
+						DataVolumeClaimSpec: &corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")},
+							},
+						},
+						AdditionalDataVolumeClaimSpecs: []v1.AdditionalVolumeClaimSpec{
+							{
+								Name:      "disk1",
+								MountPath: "/var/lib/clickhouse/disks/disk1",
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")},
+									},
+								},
+							},
+							{
+								Name:      "disk2",
+								MountPath: "/var/lib/clickhouse/disks/disk2",
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			keeper: v1.KeeperCluster{ObjectMeta: metav1.ObjectMeta{Name: "keeper"}},
+		}
+		r.Cluster.Spec.WithDefaults()
+
+		sts, err := templateStatefulSet(r, v1.ClickHouseReplicaID{ShardID: 0, Index: 0})
+		Expect(err).To(Not(HaveOccurred()))
+		Expect(sts.Spec.VolumeClaimTemplates).To(HaveLen(3)) // 1 primary + 2 additional
+		Expect(sts.Spec.VolumeClaimTemplates[0].Name).To(Equal(internal.PersistentVolumeName))
+		Expect(sts.Spec.VolumeClaimTemplates[1].Name).To(Equal("disk1"))
+		Expect(sts.Spec.VolumeClaimTemplates[2].Name).To(Equal("disk2"))
+
+		podSpec, err := templatePodSpec(r, v1.ClickHouseReplicaID{ShardID: 0, Index: 0})
+		Expect(err).To(Not(HaveOccurred()))
+		mountPaths := make(map[string]string)
+		for _, c := range podSpec.Containers {
+			for _, m := range c.VolumeMounts {
+				mountPaths[m.MountPath] = m.Name
+			}
+		}
+		Expect(mountPaths["/var/lib/clickhouse/disks/disk1"]).To(Equal("disk1"))
+		Expect(mountPaths["/var/lib/clickhouse/disks/disk2"]).To(Equal("disk2"))
+	})
+})
+
+func checkVolumeMounts(volumes []corev1.Volume, mounts []corev1.VolumeMount, vctVolumeNames ...string) {
 	volumeMap := map[string]struct{}{
 		internal.PersistentVolumeName: {},
+	}
+	for _, name := range vctVolumeNames {
+		volumeMap[name] = struct{}{}
 	}
 	for _, volume := range volumes {
 		ExpectWithOffset(1, volumeMap).NotTo(HaveKey(volume.Name))
