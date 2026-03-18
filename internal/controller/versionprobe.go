@@ -22,6 +22,8 @@ import (
 
 const (
 	versionProbeContainerName = "version-probe"
+	versionProbeNameSuffix    = "-version-probe-"
+	maxLabelValueLength       = 63
 )
 
 // VersionProbeConfig holds parameters for the version probe Job.
@@ -221,9 +223,18 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) buildVersionProbeJob(c
 		return batchv1.Job{}, fmt.Errorf("hash version probe job spec: %w", err)
 	}
 
-	job.Name = fmt.Sprintf("%s-version-probe-%s", r.Cluster.SpecificName(), specHash[:8])
+	job.Name = buildVersionProbeJobName(r.Cluster.SpecificName(), specHash[:8])
 
 	return job, nil
+}
+
+func buildVersionProbeJobName(prefix, hash string) string {
+	maxPrefixLen := maxLabelValueLength - len(versionProbeNameSuffix) - len(hash)
+	if len(prefix) > maxPrefixLen {
+		prefix = prefix[:maxPrefixLen]
+	}
+
+	return prefix + versionProbeNameSuffix + hash
 }
 
 func getJobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) (batchv1.JobCondition, bool) {
