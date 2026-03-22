@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -11,6 +12,12 @@ import (
 	"github.com/ClickHouse/clickhouse-operator/api/v1alpha1"
 	"github.com/ClickHouse/clickhouse-operator/internal"
 )
+
+// additionalVolumeNameRe matches names that are valid as Kubernetes volume / PVC names
+// (DNS label subset: lowercase alphanumeric and hyphens, must start and end with alphanumeric).
+// Hyphens are automatically converted to underscores when the name is written into the
+// ClickHouse disk configuration, so users only need to follow Kubernetes naming rules here.
+var additionalVolumeNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // validateCustomVolumeMounts validates that the provided volume mounts correspond to defined volumes and
 // do not use any reserved volume names. It returns a slice of errors for any validation issues found.
@@ -93,6 +100,8 @@ func validateAdditionalDataVolumeClaimSpecs(specs []v1alpha1.AdditionalVolumeCla
 	for i, spec := range specs {
 		if spec.Name == "" {
 			errs = append(errs, fmt.Errorf("additionalDataVolumeClaimSpecs[%d].name must not be empty", i))
+		} else if !additionalVolumeNameRe.MatchString(spec.Name) {
+			errs = append(errs, fmt.Errorf("additionalDataVolumeClaimSpecs[%d].name %q is invalid: must consist of lowercase alphanumeric characters or hyphens, and start and end with an alphanumeric character", i, spec.Name))
 		}
 		if spec.Name == internal.PersistentVolumeName {
 			errs = append(errs, fmt.Errorf("additionalDataVolumeClaimSpecs[%d].name %q collides with primary data volume name", i, spec.Name))

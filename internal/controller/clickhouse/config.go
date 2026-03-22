@@ -194,8 +194,9 @@ func (g *storageJbodConfigGenerator) Exists(r *clickhouseReconciler) bool {
 
 func (g *storageJbodConfigGenerator) Generate(r *clickhouseReconciler, _ v1.ClickHouseReplicaID) (string, error) {
 	additionalDisks := make([]struct {
-		Name string
-		Path string
+		Name     string
+		DiskName string
+		Path     string
 	}, 0, len(r.Cluster.Spec.AdditionalDataVolumeClaimSpecs))
 	for _, addl := range r.Cluster.Spec.AdditionalDataVolumeClaimSpecs {
 		diskPath := addl.MountPath
@@ -203,15 +204,21 @@ func (g *storageJbodConfigGenerator) Generate(r *clickhouseReconciler, _ v1.Clic
 			diskPath += "/"
 		}
 		additionalDisks = append(additionalDisks, struct {
-			Name string
-			Path string
-		}{Name: addl.Name, Path: diskPath})
+			Name     string
+			DiskName string
+			Path     string
+		}{
+			Name:     addl.Name,
+			DiskName: strings.ReplaceAll(addl.Name, "-", "_"),
+			Path:     diskPath,
+		})
 	}
 	params := struct {
 		DefaultDiskPath string
 		AdditionalDisks []struct {
-			Name string
-			Path string
+			Name     string
+			DiskName string
+			Path     string
 		}
 	}{
 		DefaultDiskPath: internal.ClickHouseDataPath + "/",
