@@ -197,13 +197,83 @@ func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcileConfigMap(
 }
 
 // ReconcilePVC reconciles a Kubernetes PersistentVolumeClaim resource.
+// For bound PVCs the spec is largely immutable; only spec.resources.requests.storage
+// and metadata (labels) are patched. All other spec fields are left untouched.
 func (r *ResourceReconcilerBase[Status, T, ReplicaID, S]) ReconcilePVC(
 	ctx context.Context,
 	log util.Logger,
 	pvc *corev1.PersistentVolumeClaim,
 	action v1.EventAction,
 ) (bool, error) {
-	return r.reconcileResource(ctx, log, pvc, []string{"Spec"}, action)
+	cli := r.GetClient()
+	const kind = "PersistentVolumeClaim"
+	log = log.With(kind, pvc.GetName())
+
+	if err := ctrlruntime.SetControllerReference(r.Cluster, pvc, r.GetScheme()); err != nil {
+		return false, fmt.Errorf("set %s/%s ctrl reference: %w", kind, pvc.GetName(), err)
+	}
+
+	existing := &corev1.PersistentVolumeClaim{}
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: pvc.GetNamespace(), Name: pvc.GetName()}, existing); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return false, fmt.Errorf("get %s/%s: %w", kind, pvc.GetName(), err)
+		}
+		log.Info("PVC not found, creating")
+		return true, r.Create(ctx, pvc, action)
+	}
+
+	// storageClassName is immutable; warn and skip if it diverges.
+	desiredClass := pvc.Spec.StorageClassName
+	existingClass := existing.Spec.StorageClassName
+	if desiredClass != nil && existingClass != nil && *desiredClass != *existingClass {
+		log.Warn("PVC storageClassName is immutable and cannot be changed in-place; "+
+			"delete and recreate the PVC to switch storage class",
+			"existing", *existingClass, "desired", *desiredClass)
+		r.GetRecorder().Eventf(r.Cluster, existing, corev1.EventTypeWarning, v1.EventReasonFailedUpdate, action,
+			"PVC %s storageClassName is immutable (existing: %s, desired: %s); delete and recreate to change it",
+			existing.GetName(), *existingClass, *desiredClass)
+		return false, nil
+	}
+
+	desiredStorage := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	existingStorage := existing.Spec.Resources.Requests[corev1.ResourceStorage]
+	storageChanged := desiredStorage.Cmp(existingStorage) != 0
+	vacChanged := pvc.Spec.VolumeAttributesClassName != existing.Spec.VolumeAttributesClassName
+	labelsChanged := !reflect.DeepEqual(pvc.GetLabels(), existing.GetLabels())
+
+	if !storageChanged && !vacChanged && !labelsChanged {
+		log.Debug("PVC is up to date")
+		return false, nil
+	}
+
+	// Build a merge patch that only touches the mutable fields — leaving every
+	// immutable spec field (VolumeName, VolumeMode, AccessModes, StorageClassName,
+	// Selector, DataSource, …) completely untouched.
+	base := existing.DeepCopy()
+	existing.SetLabels(pvc.GetLabels())
+	if storageChanged {
+		log.Info("resizing PVC storage", "from", existingStorage.String(), "to", desiredStorage.String())
+		if existing.Spec.Resources.Requests == nil {
+			existing.Spec.Resources.Requests = make(corev1.ResourceList)
+		}
+		existing.Spec.Resources.Requests[corev1.ResourceStorage] = desiredStorage
+	}
+	if vacChanged {
+		log.Info("updating PVC volumeAttributesClassName",
+			"from", existing.Spec.VolumeAttributesClassName, "to", pvc.Spec.VolumeAttributesClassName)
+		existing.Spec.VolumeAttributesClassName = pvc.Spec.VolumeAttributesClassName
+	}
+
+	if err := cli.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
+		recorder := r.GetRecorder()
+		if util.ShouldEmitEvent(err) {
+			recorder.Eventf(r.Cluster, existing, corev1.EventTypeWarning, v1.EventReasonFailedUpdate, action,
+				"Update %s %s failed: %s", kind, existing.GetName(), err.Error())
+		}
+		return false, fmt.Errorf("patch %s/%s: %w", kind, existing.GetName(), err)
+	}
+
+	return true, nil
 }
 
 // Create creates the given Kubernetes resource and emits events on failure.
