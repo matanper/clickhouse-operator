@@ -28,3 +28,31 @@ spec:
         resources:
           requests:
             storage: 100Gi
+
+  # The operator declares disk1 and disk2 and stops there — it does not place them in
+  # any storage policy. Until a policy names a disk, nothing writes to it, so the
+  # policy below is what actually turns these volumes into JBOD capacity.
+  #
+  # This is deliberate. Enrolling additional disks in `default` automatically would let
+  # every table that names no policy — including tables created later, by anyone — write
+  # to all of them. That is only ever correct when the disks are interchangeable, and it
+  # is unsafe when one is not: a disk backed by a volume under a customer-managed
+  # encryption key must hold that customer's table alone, and unrelated parts landing
+  # there would tie the cluster's availability to a key its owner can revoke.
+  #
+  # A single volume listing every disk gives round-robin distribution across them.
+  settings:
+    extraConfig:
+      storage_configuration:
+        policies:
+          jbod:
+            volumes:
+              main:
+                disk:
+                  - default
+                  - disk1
+                  - disk2
+      # Opt whole tables in by default, rather than per CREATE TABLE. Omit this and use
+      # `SETTINGS storage_policy = 'jbod'` per table if only some tables should spread.
+      merge_tree:
+        storage_policy: jbod

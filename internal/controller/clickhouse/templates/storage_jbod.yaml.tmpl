@@ -1,17 +1,19 @@
-{{- /* Storage configuration: all disks in a single volume for true JBOD round-robin distribution */}}
+{{- /* Storage configuration: declare the additional disks only. */}}
 {{- /* DiskName is the ClickHouse identifier (hyphens replaced with underscores); Path uses the original name. */}}
+{{- /*                                                                                                        */}}
+{{- /* Deliberately no `policies` here. Adding these disks to the `default` policy would make every table that */}}
+{{- /* does not name a policy — including any created later, by anyone — eligible to write to every additional */}}
+{{- /* disk. That is wrong whenever a disk is not interchangeable capacity: a disk backed by a volume under a  */}}
+{{- /* customer-managed encryption key must hold that customer's table and nothing else, and unrelated parts   */}}
+{{- /* landing there would also make the cluster's availability depend on a key its owner can revoke.          */}}
+{{- /*                                                                                                        */}}
+{{- /* Composing disks into volumes is therefore left to spec.settings.extraConfig, which renders to           */}}
+{{- /* 99-extra-config.yaml and so merges over this file. Emitting nothing here means the operator cannot       */}}
+{{- /* silently widen a policy the cluster owner wrote. With no policy naming them, these disks are inert       */}}
+{{- /* until something opts in, which is the safe default in both directions.                                  */}}
 storage_configuration:
   disks:
 {{- range .AdditionalDisks }}
     {{ .DiskName }}:
       path: {{ .Path }}
-{{- end }}
-  policies:
-    default:
-      volumes:
-        main:
-          disk:
-            - default
-{{- range .AdditionalDisks }}
-            - {{ .DiskName }}
 {{- end }}

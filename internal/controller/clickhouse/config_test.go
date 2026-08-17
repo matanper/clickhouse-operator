@@ -89,23 +89,22 @@ var _ = Describe("ConfigGenerator", func() {
 		Expect(storageConfig).To(ContainSubstring("/var/lib/clickhouse/disks/disk1/"))
 		Expect(storageConfig).To(ContainSubstring("/custom/path/"))
 
-		// Verify true JBOD: all disks must be listed inside a single "main" volume
-		// as a YAML list (round-robin distribution), not as separate per-disk volumes.
 		parsed := map[any]any{}
 		Expect(yaml.Unmarshal([]byte(storageConfig), &parsed)).To(Succeed())
-		disks := parsed["storage_configuration"].(map[any]any)["disks"].(map[any]any)
+		storage := parsed["storage_configuration"].(map[any]any)
+
+		disks := storage["disks"].(map[any]any)
 		Expect(disks).NotTo(HaveKey("default"), "default disk must not be explicitly defined in JBOD config")
-		policies := parsed["storage_configuration"].(map[any]any)["policies"].(map[any]any)
-		volumes := policies["default"].(map[any]any)["volumes"].(map[any]any)
-		Expect(volumes).To(HaveLen(1), "true JBOD has exactly one volume containing all disks")
-		mainVolume := volumes["main"].(map[any]any)
-		diskList, ok := mainVolume["disk"].([]any)
-		Expect(ok).To(BeTrue(), "disks under main volume must be a list")
-		diskNames := make([]string, len(diskList))
-		for i, d := range diskList {
-			diskNames[i] = d.(string)
-		}
-		Expect(diskNames).To(ContainElements("default", "disk1", "disk2"))
+		Expect(disks).To(HaveKey("disk1"))
+		Expect(disks).To(HaveKey("disk2"))
+
+		// The generator declares disks and stops. Composing them into volumes belongs to
+		// extraConfig, which merges over this file. Emitting a policy here would enrol every
+		// additional disk in `default`, making any table that names no policy eligible to
+		// write to all of them — unacceptable for a disk that is not interchangeable
+		// capacity, such as one backed by a customer-managed encryption key.
+		Expect(storage).NotTo(HaveKey("policies"),
+			"the operator must not define storage policies; a disk is inert until extraConfig opts it in")
 	})
 
 })
